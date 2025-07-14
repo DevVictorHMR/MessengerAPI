@@ -1,17 +1,25 @@
-﻿using MessengerAPI.Data;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using Microsoft.EntityFrameworkCore;
+using Newtonsoft.Json;
+using MessengerAPI.Data;
 using MessengerAPI.DTOs;
 using MessengerAPI.Models;
-using Microsoft.EntityFrameworkCore;
+using MessengerAPI.Services;
 
 namespace MessengerAPI.Services
 {
     public class MessageService : IMessageService
     {
         private readonly ApplicationDbContext _context;
+        private readonly IRabbitMqService _rabbitMqService;
 
-        public MessageService(ApplicationDbContext context)
+        public MessageService(ApplicationDbContext context, IRabbitMqService rabbitMqService)
         {
             _context = context;
+            _rabbitMqService = rabbitMqService;
         }
 
         public async Task<List<MessageDto>> GetAllMessagesAsync()
@@ -29,7 +37,7 @@ namespace MessengerAPI.Services
 
         public async Task<MessageDto> GetMessageByIdAsync(int id)
         {
-            return await _context.Messages
+            var message = await _context.Messages
                 .Where(m => m.Id == id)
                 .Select(m => new MessageDto
                 {
@@ -38,7 +46,15 @@ namespace MessengerAPI.Services
                     Timestamp = m.Timestamp,
                     SenderId = m.SenderId,
                     ReceiverId = m.ReceiverId
-                }).FirstOrDefaultAsync() ?? throw new KeyNotFoundException("Message not found");
+                })
+                .FirstOrDefaultAsync();
+
+            if (message == null)
+            {
+                throw new KeyNotFoundException("Mensagem não encontrada.");
+            }
+
+            return message;
         }
 
         public async Task<MessageDto> CreateMessageAsync(MessageDto messageDto)
@@ -54,6 +70,18 @@ namespace MessengerAPI.Services
             await _context.SaveChangesAsync();
 
             messageDto.Id = message.Id;
+
+            var messageJson = JsonConvert.SerializeObject(new
+            {
+                messageDto.Id,
+                messageDto.Content,
+                messageDto.SenderId,
+                messageDto.ReceiverId,
+                messageDto.Timestamp
+            });
+
+            _rabbitMqService.PublishMessage(messageJson);
+
             return messageDto;
         }
 
@@ -64,34 +92,6 @@ namespace MessengerAPI.Services
             {
                 _context.Messages.Remove(message);
                 await _context.SaveChangesAsync();
-            }
-        }
-    }
-    public class SqsConsumerService : BackgroundService
-    {
-        private readonly ISqsService _sqsService;
-        private readonly IConfiguration _config;
-
-        public SqsConsumerService(ISqsService sqsService, IConfiguration config)
-        {
-            _sqsService = sqsService;
-            _config = config;
-        }
-
-        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-        {
-            var queueUrl = _config["AWS:QueueUrl"];
-
-            while (!stoppingToken.IsCancellationRequested)
-            {
-                var message = await _sqsService.ReceiveMessageFromQueueAsync(queueUrl);
-                if (message != null)
-                {
-                    Console.WriteLine($"Mensagem recebida: {message}");
-                    // Aqui você pode processar a mensagem, salvar, notificar, etc.
-                }
-
-                await Task.Delay(5000, stoppingToken); // A cada 5 segundos
             }
         }
     }
